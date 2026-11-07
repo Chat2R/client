@@ -20,19 +20,28 @@ export class Chat2rClient {
     this.config = loadConfig();
     this.serverUrl = String(options.server || process.env.CHAT2R_SERVER || process.env.CHAT2U_SERVER || this.config.serverUrl || DEFAULT_SERVER_URL).replace(/\/$/, "");
     this.unattended = Boolean(options.unattended);
-    this.noOpen = Boolean(options.noOpen);
+    this.noOpen = Boolean(options.noOpen || this.unattended);
     this.roots = options.roots?.length ? options.roots : [process.cwd()];
     this.allowShell = options.allowShell !== false;
-    this.ui = new TerminalUI();
-    this.executor = createExecutor({
+    this.ui = options.ui || new TerminalUI({ interactive: !this.unattended });
+    this.executor = options.executor || createExecutor({
       roots: this.roots,
       allowShell: this.allowShell
     });
+    this.WebSocketClass = options.WebSocketClass || WebSocket;
+    this.random = typeof options.random === "function" ? options.random : Math.random;
+    this.reconnectMinMs = Math.max(100, Number(options.reconnectMinMs || 1000));
+    this.reconnectMaxMs = Math.max(this.reconnectMinMs, Number(options.reconnectMaxMs || 30000));
+    this.connectTimeoutMs = Math.max(1000, Number(options.connectTimeoutMs || 15000));
+    this.heartbeatIntervalMs = Math.max(1000, Number(options.heartbeatIntervalMs || 15000));
+    this.heartbeatTimeoutMs = Math.max(this.heartbeatIntervalMs * 2, Number(options.heartbeatTimeoutMs || 45000));
     this.ws = null;
     this.stopped = false;
     this.reconnectAttempt = 0;
     this.reconnectTimer = null;
+    this.connectTimer = null;
     this.heartbeatTimer = null;
+    this.lastPongAt = 0;
     this.ready = false;
   }
 
@@ -56,6 +65,7 @@ export class Chat2rClient {
 
   async connect() {
     if (this.stopped) return;
+    if (this.ws && [WebSocket.CONNECTING, WebSocket.OPEN].includes(this.ws.readyState)) return;
 
     const wsUrl = new URL(this.serverUrl);
     wsUrl.protocol = wsUrl.protocol === "https:" ? "wss:" : "ws:";
@@ -64,33 +74,57 @@ export class Chat2rClient {
 
     this.ui.log(`Connecting to ${wsUrl.toString()}`);
 
-    const ws = new WebSocket(wsUrl, {
+    const ws = new this.WebSocketClass(wsUrl, {
       maxPayload: 1024 * 1024,
       perMessageDeflate: false
     });
     this.ws = ws;
+    this.clearConnectTimer();
+    this.connectTimer = setTimeout(() => {
+      if (this.ws !== ws || ws.readyState !== WebSocket.CONNECTING) return;
+      this.ui.log("Relay connection attempt timed out; retrying.", "warning");
+      ws.terminate();
+    }, this.connectTimeoutMs);
 
     ws.on("open", () => {
-      this.reconnectAttempt = 0;
+      if (this.ws !== ws || this.stopped) return;
+      this.clearConnectTimer();
       if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
       this.ready = false;
+      this.lastPongAt = Date.now();
       this.ui.log("Connected to relay.", "success");
-      this.sendHello();
-      this.startHeartbeat();
+      try {
+        this.sendHello();
+        this.startHeartbeat(ws);
+      } catch (error) {
+        this.ui.log(`Could not initialize relay session: ${error.message}`, "error");
+        ws.terminate();
+      }
+    });
+
+    ws.on("pong", () => {
+      if (this.ws === ws) this.lastPongAt = Date.now();
     });
 
     ws.on("message", (data) => {
+      if (this.ws !== ws) return;
       const message = parseMessage(data);
       if (!message) {
         this.ui.log("Ignored malformed relay message.", "warning");
         return;
       }
-      void this.handleServerMessage(message);
+      this.reconnectAttempt = 0;
+      void this.handleServerMessage(message).catch((error) => {
+        this.ui.log(`Relay message handling failed: ${error.message}`, "error");
+      });
     });
 
     ws.on("close", (code, reason) => {
+      if (this.ws !== ws) return;
+      this.ws = null;
       this.ready = false;
+      this.clearConnectTimer();
       this.stopHeartbeat();
       if (this.stopped) return;
 
@@ -100,7 +134,9 @@ export class Chat2rClient {
     });
 
     ws.on("error", (error) => {
+      if (this.ws !== ws) return;
       this.ui.log(`WebSocket error: ${error.message}`, "error");
+      if (ws.readyState !== WebSocket.CLOSED) ws.terminate();
     });
   }
 
@@ -121,14 +157,32 @@ export class Chat2rClient {
     });
   }
 
-  startHeartbeat() {
+  clearConnectTimer() {
+    if (this.connectTimer) clearTimeout(this.connectTimer);
+    this.connectTimer = null;
+  }
+
+  startHeartbeat(ws = this.ws) {
     this.stopHeartbeat();
+    this.lastPongAt = Date.now();
     this.heartbeatTimer = setInterval(() => {
-      if (this.ws?.readyState === WebSocket.OPEN) {
-        this.send(MSG_TYPES.HEARTBEAT, {});
+      if (this.ws !== ws || ws?.readyState !== WebSocket.OPEN) return;
+      if (Date.now() - this.lastPongAt > this.heartbeatTimeoutMs) {
+        this.ui.log("Relay heartbeat timed out; reconnecting.", "warning");
+        ws.terminate();
+        return;
       }
-    }, 20000);
-    this.heartbeatTimer.unref?.();
+
+      try {
+        ws.ping();
+      } catch (error) {
+        this.ui.log(`Relay ping failed: ${error.message}`, "warning");
+        ws.terminate();
+        return;
+      }
+
+      this.trySend(MSG_TYPES.HEARTBEAT, {});
+    }, this.heartbeatIntervalMs);
   }
 
   stopHeartbeat() {
@@ -138,12 +192,17 @@ export class Chat2rClient {
 
   scheduleReconnect() {
     if (this.reconnectTimer || this.stopped) return;
-    const attempt = Math.min(this.reconnectAttempt++, 6);
-    const delay = Math.min(30000, 1000 * (2 ** attempt));
-    this.ui.log(`Reconnecting in ${Math.round(delay / 1000)}s…`);
+    const attempt = Math.min(this.reconnectAttempt++, 10);
+    const baseDelay = Math.min(this.reconnectMaxMs, this.reconnectMinMs * (2 ** attempt));
+    const jitter = 0.8 + (this.random() * 0.4);
+    const delay = Math.max(this.reconnectMinMs, Math.round(baseDelay * jitter));
+    this.ui.log(`Reconnecting in ${Math.max(1, Math.round(delay / 1000))}s…`);
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
-      void this.connect();
+      void this.connect().catch((error) => {
+        this.ui.log(`Reconnect failed: ${error.message}`, "error");
+        this.scheduleReconnect();
+      });
     }, delay);
   }
 
@@ -152,6 +211,15 @@ export class Chat2rClient {
       throw new Error("Relay is not connected.");
     }
     this.ws.send(makeMessage(type, payload, id));
+  }
+
+  trySend(type, payload = {}, id) {
+    try {
+      this.send(type, payload, id);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   async handleServerMessage(message) {
@@ -266,7 +334,7 @@ export class Chat2rClient {
       });
 
       if (!approved) {
-        this.send(MSG_TYPES.ACTION_RESULT, {
+        this.trySend(MSG_TYPES.ACTION_RESULT, {
           actionId,
           success: false,
           error: "Action declined by the machine owner."
@@ -346,9 +414,7 @@ export class Chat2rClient {
             if (!safeChunk) return;
 
             streamedBytes += Buffer.byteLength(safeChunk, "utf8");
-            if (this.ws?.readyState === WebSocket.OPEN) {
-              this.send(MSG_TYPES.ACTION_CHUNK, { actionId, stream, chunk: safeChunk });
-            }
+            this.trySend(MSG_TYPES.ACTION_CHUNK, { actionId, stream, chunk: safeChunk });
           });
           break;
         }
@@ -392,19 +458,22 @@ export class Chat2rClient {
           throw new Error(`Unsupported machine tool: ${tool}`);
       }
 
-      this.send(MSG_TYPES.ACTION_RESULT, {
+      const delivered = this.trySend(MSG_TYPES.ACTION_RESULT, {
         actionId,
         success: true,
         result
       });
-      this.ui.log(`${tool} completed.`, "success");
+      this.ui.log(
+        delivered ? `${tool} completed.` : `${tool} completed while relay was offline; result could not be delivered.`,
+        delivered ? "success" : "warning"
+      );
     } catch (error) {
-      this.send(MSG_TYPES.ACTION_RESULT, {
+      this.trySend(MSG_TYPES.ACTION_RESULT, {
         actionId,
         success: false,
         error: error instanceof Error ? error.message : String(error)
       });
-      this.ui.log(`${tool} failed: ${error.message}`, "error");
+      this.ui.log(`${tool} failed: ${error instanceof Error ? error.message : String(error)}`, "error");
     }
   }
 
@@ -412,10 +481,15 @@ export class Chat2rClient {
     this.stopped = true;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.reconnectTimer = null;
+    this.clearConnectTimer();
     this.stopHeartbeat();
     void this.executor.shutdown({ killRunning: true });
-    if (this.ws?.readyState === WebSocket.OPEN) {
-      this.ws.close(1000, "client shutdown");
+    const ws = this.ws;
+    this.ws = null;
+    if (ws?.readyState === WebSocket.OPEN) {
+      ws.close(1000, "client shutdown");
+    } else if (ws && ws.readyState !== WebSocket.CLOSED) {
+      ws.terminate();
     }
     this.ui.close();
   }

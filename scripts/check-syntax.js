@@ -2,7 +2,7 @@
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 
-const roots = ["bin", "src"];
+const roots = ["bin", "src", "test"];
 const files = [];
 for (const root of roots) {
   for (const name of readdirSync(root)) {

@@ -79,7 +79,7 @@ Options:
                            Defaults to the current working directory.
       --allow-shell        Explicitly enable exec_command (enabled by default; compatibility flag).
       --no-shell           Disable shell command execution entirely.
-  -u, --unattended         Skip local approval prompts. Use only on machines you fully trust.
+  -u, --unattended         Daemon-friendly mode: no stdin/browser prompts, reconnects indefinitely.
       --no-open            Do not automatically open the pairing page.
   -h, --help               Show this help.
 

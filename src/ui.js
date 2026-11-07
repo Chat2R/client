@@ -12,15 +12,18 @@ const ANSI = {
 };
 
 export class TerminalUI {
-  constructor() {
-    this.rl = readline.createInterface({
-      input: process.stdin,
-      output: process.stdout
-    });
+  constructor({ interactive = true } = {}) {
+    this.interactive = Boolean(interactive);
+    this.rl = this.interactive
+      ? readline.createInterface({
+          input: process.stdin,
+          output: process.stdout
+        })
+      : null;
   }
 
   banner() {
-    console.clear();
+    if (process.stdout.isTTY) console.clear();
     console.log(`${ANSI.bold}Chat2R${ANSI.reset}  ${ANSI.dim}local machine bridge${ANSI.reset}`);
     console.log(`${ANSI.gray}──────────────────────────────────────────────────${ANSI.reset}\n`);
   }
@@ -43,6 +46,7 @@ export class TerminalUI {
   }
 
   prompt(question) {
+    if (!this.rl) throw new Error("Interactive prompts are unavailable in unattended mode.");
     return new Promise((resolve) => {
       this.rl.question(question, (answer) => resolve(answer.trim()));
     });
@@ -74,6 +78,6 @@ export class TerminalUI {
   }
 
   close() {
-    this.rl.close();
+    this.rl?.close();
   }
 }
