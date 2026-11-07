@@ -16,6 +16,7 @@ const SERVICE_NAME = "Chat2R Machine Client";
 const SERVICE_ID = "chat2r-client";
 const SERVICE_CONFIG = join(CONFIG_DIR, "service.json");
 const SERVICE_LOG = join(CONFIG_DIR, "service.log");
+const SERVICE_LAUNCHER = join(CONFIG_DIR, "service-launcher.vbs");
 const RUNTIME_DIR = join(CONFIG_DIR, "service-runtime");
 const PACKAGE_JSON = fileURLToPath(new URL("../package.json", import.meta.url));
 
@@ -36,6 +37,10 @@ function windowsQuote(value) {
 
 function shellQuote(value) {
   return `'${String(value).replaceAll("'", "'\\''")}'`;
+}
+
+function vbString(value) {
+  return String(value).replaceAll('"', '""');
 }
 
 function run(command, args, options = {}) {
@@ -105,11 +110,17 @@ function installRuntime() {
   }
 }
 
+export function buildWindowsLauncher(options, nodePath = process.execPath) {
+  const command = [nodePath, ...serviceArgs(options)].map(windowsQuote).join(" ");
+  return `Set shell = CreateObject("WScript.Shell")\r\nexitCode = shell.Run("${vbString(command)}", 0, True)\r\nWScript.Quit exitCode\r\n`;
+}
+
 export function buildWindowsTaskXml(options, nodePath = process.execPath) {
   const username = process.env.USERDOMAIN && process.env.USERNAME
     ? `${process.env.USERDOMAIN}\\${process.env.USERNAME}`
     : userInfo().username;
-  const argumentsText = serviceArgs(options).map(windowsQuote).join(" ");
+  const wscript = join(process.env.SystemRoot || "C:\\Windows", "System32", "wscript.exe");
+  const argumentsText = `//B //Nologo ${windowsQuote(SERVICE_LAUNCHER)}`;
 
   return `<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
@@ -151,7 +162,7 @@ export function buildWindowsTaskXml(options, nodePath = process.execPath) {
   </Settings>
   <Actions Context="Author">
     <Exec>
-      <Command>${xml(nodePath)}</Command>
+      <Command>${xml(wscript)}</Command>
       <Arguments>${xml(argumentsText)}</Arguments>
       <WorkingDirectory>${xml(options.roots[0])}</WorkingDirectory>
     </Exec>
@@ -165,6 +176,7 @@ function windowsTaskFile() {
 
 function installWindows(options) {
   const taskFile = windowsTaskFile();
+  writeFileSync(SERVICE_LAUNCHER, buildWindowsLauncher(options), "utf8");
   writeFileSync(taskFile, "\ufeff" + buildWindowsTaskXml(options), "utf16le");
   run("schtasks.exe", ["/Create", "/TN", SERVICE_NAME, "/XML", taskFile, "/F"]);
   run("schtasks.exe", ["/Run", "/TN", SERVICE_NAME]);
@@ -188,6 +200,7 @@ function windowsAction(action) {
     run("schtasks.exe", ["/End", "/TN", SERVICE_NAME], { allowFailure: true });
     run("schtasks.exe", ["/Delete", "/TN", SERVICE_NAME, "/F"], { allowFailure: true });
     rmSync(windowsTaskFile(), { force: true });
+    rmSync(SERVICE_LAUNCHER, { force: true });
     return "Chat2R background task removed.";
   }
   throw new Error(`Unsupported service action: ${action}`);
