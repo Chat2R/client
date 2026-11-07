@@ -1,0 +1,25 @@
+{
+  "name": "chat2r",
+  "version": "2.0.0",
+  "description": "Secure local machine bridge for ChatGPT and MCP hosts",
+  "type": "module",
+  "bin": {
+    "chat2r": "./bin/chat2r.js",
+    "chat2u": "./bin/chat2u.js"
+  },
+  "main": "src/index.js",
+  "files": [
+    "bin",
+    "src"
+  ],
+  "engines": {
+    "node": ">=20.11"
+  },
+  "dependencies": {
+    "@chat2r/shared": "2.0.0",
+    "fast-glob": "^3.3.3",
+    "open": "^11.0.4",
+    "playwright": "^1.65.0",
+    "ws": "^8.22.1"
+  }
+}
