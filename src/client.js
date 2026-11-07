@@ -452,6 +452,12 @@ export class Chat2rClient {
         case "browser_snapshot":
           result = await this.executor.browserSnapshot(args);
           break;
+        case "browser_screenshot":
+          result = await this.executor.browserScreenshot(args);
+          break;
+        case "browser_evaluate":
+          result = await this.executor.browserEvaluate(args);
+          break;
         case "browser_click":
           result = await this.executor.browserClick(args);
           break;

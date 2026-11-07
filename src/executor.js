@@ -1493,6 +1493,83 @@ export class RootedExecutor {
     return this.browserSnapshotRecord(this.requireBrowser(browser_id));
   }
 
+  async browserScreenshot({
+    browser_id,
+    full_page = false,
+    selector = null,
+    omit_background = false,
+    format = "jpeg",
+    quality = 80
+  }) {
+    const record = this.requireBrowser(browser_id);
+    const target = String(selector || "").trim();
+    const screenshotFormat = format === "png" ? "png" : "jpeg";
+    const options = {
+      type: screenshotFormat,
+      omitBackground: Boolean(omit_background),
+      ...(screenshotFormat === "jpeg"
+        ? { quality: Math.min(Math.max(Number(quality) || 80, 1), 100) }
+        : {})
+    };
+
+    const buffer = target
+      ? await record.page.locator(target).first().screenshot(options)
+      : await record.page.screenshot({ ...options, fullPage: Boolean(full_page) });
+
+    if (buffer.length > 12 * 1024 * 1024) {
+      throw new Error("Screenshot is larger than 12 MiB. Capture the viewport/a selector or use JPEG with a lower quality.");
+    }
+
+    record.last_seen = Date.now();
+    return {
+      browser_id: record.browser_id,
+      url: record.page.url(),
+      title: await record.page.title(),
+      selector: target || null,
+      full_page: target ? false : Boolean(full_page),
+      mime_type: screenshotFormat === "png" ? "image/png" : "image/jpeg",
+      image_base64: buffer.toString("base64")
+    };
+  }
+
+  async browserEvaluate({ browser_id, script }) {
+    const record = this.requireBrowser(browser_id);
+    const source = String(script || "");
+    if (!source.trim()) throw new Error("JavaScript source is required.");
+
+    const value = await record.page.evaluate(async (code) => {
+      const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+
+      try {
+        return await new AsyncFunction(`return (\n${code}\n);`)();
+      } catch (error) {
+        if (!(error instanceof SyntaxError)) throw error;
+        return await new AsyncFunction(code)();
+      }
+    }, source);
+
+    let result = value;
+    let truncated = false;
+    try {
+      const encoded = JSON.stringify(value);
+      if (encoded && Buffer.byteLength(encoded, "utf8") > 256 * 1024) {
+        result = truncateOutput(encoded, 256 * 1024);
+        truncated = true;
+      }
+    } catch {
+      result = String(value);
+    }
+
+    record.last_seen = Date.now();
+    return {
+      browser_id: record.browser_id,
+      url: record.page.url(),
+      title: await record.page.title(),
+      result,
+      truncated
+    };
+  }
+
   async browserClick({ browser_id, selector }) {
     const record = this.requireBrowser(browser_id);
     const target = String(selector || "").trim();
