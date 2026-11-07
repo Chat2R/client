@@ -1,7 +1,19 @@
 {
   "name": "chat2r",
   "version": "2.0.0",
-  "description": "Secure local machine bridge for ChatGPT and MCP hosts",
+  "description": "Connect your machine securely to Chat2R for agentic work from ChatGPT",
+  "homepage": "https://chat2r.ender.com.pl",
+  "license": "UNLICENSED",
+  "keywords": [
+    "chatgpt",
+    "mcp",
+    "agent",
+    "remote",
+    "cli"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "type": "module",
   "bin": {
     "chat2r": "./bin/chat2r.js",
@@ -16,7 +28,7 @@
     "node": ">=20.11"
   },
   "dependencies": {
-    "@chat2r/shared": "2.0.0",
+    "zod": "^4.6.7",
     "@xterm/headless": "^6.0.0",
     "fast-glob": "^3.3.3",
     "node-pty": "^1.1.0",

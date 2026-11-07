@@ -23,7 +23,7 @@ import fg from "fast-glob";
 import { chromium } from "playwright";
 import * as nodePty from "node-pty";
 import xtermHeadless from "@xterm/headless";
-import { computeUnifiedDiff } from "@chat2r/shared";
+import { computeUnifiedDiff } from "./diff.js";
 
 const { Terminal } = xtermHeadless;
 

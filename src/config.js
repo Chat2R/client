@@ -13,8 +13,11 @@ const CONFIG_FILE = join(CONFIG_DIR, "config.json");
 const LEGACY_CONFIG_DIR = join(homedir(), ".chat2u");
 const LEGACY_CONFIG_FILE = join(LEGACY_CONFIG_DIR, "config.json");
 
+export const DEFAULT_SERVER_URL = "https://chat2r.ender.com.pl";
+const LEGACY_SERVER_URL = "https://chat2u.ender.com.pl";
+
 const DEFAULTS = Object.freeze({
-  serverUrl: "http://localhost:8787",
+  serverUrl: DEFAULT_SERVER_URL,
   machineId: null,
   machineName: null,
   credential: null
@@ -26,7 +29,9 @@ export function loadConfig() {
       ? CONFIG_FILE
       : (existsSync(LEGACY_CONFIG_FILE) ? LEGACY_CONFIG_FILE : null);
     if (!source) return { ...DEFAULTS };
-    return { ...DEFAULTS, ...JSON.parse(readFileSync(source, "utf8")) };
+    const loaded = { ...DEFAULTS, ...JSON.parse(readFileSync(source, "utf8")) };
+    if (loaded.serverUrl === LEGACY_SERVER_URL) loaded.serverUrl = DEFAULT_SERVER_URL;
+    return loaded;
   } catch {
     return { ...DEFAULTS };
   }

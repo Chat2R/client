@@ -5,9 +5,10 @@ import {
   makeMessage,
   MSG_TYPES,
   parseMessage
-} from "@chat2r/shared";
+} from "./protocol.js";
 import {
   clearMachineCredential,
+  DEFAULT_SERVER_URL,
   loadConfig,
   saveConfig
 } from "./config.js";
@@ -17,7 +18,7 @@ import { TerminalUI } from "./ui.js";
 export class Chat2rClient {
   constructor(options = {}) {
     this.config = loadConfig();
-    this.serverUrl = String(options.server || process.env.CHAT2R_SERVER || process.env.CHAT2U_SERVER || this.config.serverUrl || "http://localhost:8787").replace(/\/$/, "");
+    this.serverUrl = String(options.server || process.env.CHAT2R_SERVER || process.env.CHAT2U_SERVER || this.config.serverUrl || DEFAULT_SERVER_URL).replace(/\/$/, "");
     this.unattended = Boolean(options.unattended);
     this.noOpen = Boolean(options.noOpen);
     this.roots = options.roots?.length ? options.roots : [process.cwd()];

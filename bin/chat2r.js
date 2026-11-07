@@ -74,7 +74,7 @@ Usage:
   chat2r [options]
 
 Options:
-  -s, --server <url>       Relay URL. Defaults to saved config or http://localhost:8787.
+  -s, --server <url>       Relay URL. Defaults to saved config or https://chat2r.ender.com.pl.
   -r, --root <path>        Share a filesystem root. Repeat to share multiple roots.
                            Defaults to the current working directory.
       --allow-shell        Explicitly enable exec_command (enabled by default; compatibility flag).
