@@ -110,7 +110,8 @@ export class Chat2rClient {
         roots: this.executor.roots
       },
       capabilities: {
-        shell: this.allowShell
+        shell: this.allowShell,
+        pty: this.allowShell
       }
     });
   }
@@ -328,6 +329,9 @@ export class Chat2rClient {
           break;
         case "write_background_input":
           result = this.executor.writeBackgroundInput(args);
+          break;
+        case "resize_terminal":
+          result = this.executor.resizeTerminal(args);
           break;
         case "kill_background_command":
           result = await this.executor.killBackgroundCommand(args);

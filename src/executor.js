@@ -21,7 +21,11 @@ import {
 import { arch, cpus, freemem, hostname, platform, totalmem, uptime } from "node:os";
 import fg from "fast-glob";
 import { chromium } from "playwright";
+import * as nodePty from "node-pty";
+import xtermHeadless from "@xterm/headless";
 import { computeUnifiedDiff } from "@chat2r/shared";
+
+const { Terminal } = xtermHeadless;
 
 const DEFAULT_MAX_TEXT_BYTES = 10 * 1024 * 1024;
 const DEFAULT_MAX_OUTPUT_BYTES = 384 * 1024;
@@ -30,6 +34,30 @@ const MAX_COMMAND_YIELD_MS = 60000;
 const MAX_COMMAND_RUNTIME_MS = 24 * 60 * 60 * 1000;
 const COMMAND_RETENTION_MS = 30 * 60 * 1000;
 const MAX_TRACKED_COMMANDS = 100;
+const DEFAULT_TERMINAL_COLS = 120;
+const DEFAULT_TERMINAL_ROWS = 30;
+const DEFAULT_TERMINAL_TYPE = "xterm-256color";
+const TERMINAL_KEY_SEQUENCES = Object.freeze({
+  ENTER: "\r",
+  TAB: "\t",
+  ESC: "\x1b",
+  BACKSPACE: "\x7f",
+  DELETE: "\x1b[3~",
+  UP: "\x1b[A",
+  DOWN: "\x1b[B",
+  RIGHT: "\x1b[C",
+  LEFT: "\x1b[D",
+  HOME: "\x1b[H",
+  END: "\x1b[F",
+  PAGE_UP: "\x1b[5~",
+  PAGE_DOWN: "\x1b[6~",
+  CTRL_A: "\x01",
+  CTRL_C: "\x03",
+  CTRL_D: "\x04",
+  CTRL_E: "\x05",
+  CTRL_L: "\x0c",
+  CTRL_Z: "\x1a"
+});
 const IGNORED_DIRS = ["node_modules", ".git", ".svn", ".hg", ".cache"];
 
 function containment(root, candidate) {
@@ -627,6 +655,36 @@ export class RootedExecutor {
     return { processes };
   }
 
+  cleanupPtyResources(record) {
+    if (!record?.pty || !record.pty_process || record.pty_cleanup_requested) return;
+    record.pty_cleanup_requested = true;
+
+    if (process.platform === "win32") {
+      //// node-pty 1.1 leaves its ConPTY input socket and conout worker alive after
+      //// normal process exit. Dispose those owned resources through the agent's
+      //// lifecycle hooks so the long-running Chat2R client does not leak handles.
+      try {
+        record.pty_process._agent?._inSocket?.destroy();
+      } catch {}
+      try {
+        record.pty_process._agent?._conoutSocketWorker?.dispose();
+      } catch {}
+    }
+  }
+
+  terminalScreenSnapshot(record) {
+    if (!record?.terminal) return null;
+    const buffer = record.terminal.buffer.active;
+    const start = Math.max(0, buffer.viewportY);
+    const lines = [];
+    for (let index = 0; index < record.rows; index++) {
+      const line = buffer.getLine(start + index);
+      lines.push(line ? line.translateToString(true) : "");
+    }
+    while (lines.length && lines[lines.length - 1] === "") lines.pop();
+    return lines.join("\n");
+  }
+
   readProcessOutput({ command_id, stdout_offset = 0, stderr_offset = 0, max_chars = 65536 }) {
     const record = this.requireCommand(command_id);
     const limit = Math.min(Math.max(Number(max_chars || 65536), 1), 262144);
@@ -639,6 +697,13 @@ export class RootedExecutor {
       command_id: record.command_id,
       status: record.status,
       exit_code: record.exit_code,
+      pty: Boolean(record.pty),
+      terminal: record.pty ? {
+        cols: record.cols,
+        rows: record.rows,
+        type: record.terminal_type,
+        screen: this.terminalScreenSnapshot(record)
+      } : null,
       output_truncated: Boolean(record.output_truncated),
       stdout: {
         data: stdout,
@@ -681,6 +746,7 @@ export class RootedExecutor {
     for (const [id, record] of this.commands) {
       if (record.status === "running" || record.status === "killing") continue;
       if ((record.completed_at || record.started_at) < now - COMMAND_RETENTION_MS) {
+        record.terminal?.dispose();
         this.commands.delete(id);
       }
     }
@@ -691,7 +757,9 @@ export class RootedExecutor {
       .sort((a, b) => (a.completed_at || a.started_at) - (b.completed_at || b.started_at));
 
     while (this.commands.size > MAX_TRACKED_COMMANDS && removable.length) {
-      this.commands.delete(removable.shift().command_id);
+      const record = removable.shift();
+      record.terminal?.dispose();
+      this.commands.delete(record.command_id);
     }
   }
 
@@ -707,7 +775,14 @@ export class RootedExecutor {
       exit_code: record.exit_code,
       signal: record.signal,
       backgrounded: record.status === "running" || record.status === "killing",
-      output_truncated: Boolean(record.output_truncated)
+      output_truncated: Boolean(record.output_truncated),
+      pty: Boolean(record.pty),
+      terminal: record.pty ? {
+        cols: record.cols,
+        rows: record.rows,
+        type: record.terminal_type,
+        screen: this.terminalScreenSnapshot(record)
+      } : null
     };
 
     if (includeOutput) {
@@ -724,7 +799,15 @@ export class RootedExecutor {
     return record;
   }
 
-  startCommand({ command, workdir, max_runtime_ms = 0 }, onChunk = null) {
+  startCommand({
+    command,
+    workdir,
+    max_runtime_ms = 0,
+    pty = false,
+    cols = DEFAULT_TERMINAL_COLS,
+    rows = DEFAULT_TERMINAL_ROWS,
+    terminal_type = DEFAULT_TERMINAL_TYPE
+  }, onChunk = null) {
     if (!this.allowShell) {
       throw new Error("Shell execution is disabled. Restart Chat2R without --no-shell to enable it.");
     }
@@ -734,9 +817,19 @@ export class RootedExecutor {
 
     const cwd = this.commandWorkdir(workdir);
     const isWindows = process.platform === "win32";
+    const usePty = Boolean(pty);
+    const terminalCols = Math.min(Math.max(Number(cols || DEFAULT_TERMINAL_COLS), 20), 500);
+    const terminalRows = Math.min(Math.max(Number(rows || DEFAULT_TERMINAL_ROWS), 5), 200);
+    const terminalType = String(terminal_type || DEFAULT_TERMINAL_TYPE);
+    if (!/^[A-Za-z0-9._+-]{1,64}$/.test(terminalType)) {
+      throw new Error("terminal_type contains unsupported characters.");
+    }
+
     const shell = isWindows ? "powershell.exe" : (process.env.SHELL || "/bin/sh");
     const shellArgs = isWindows
-      ? ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", text]
+      ? usePty
+        ? ["-NoLogo", "-NoProfile", "-Command", text]
+        : ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", text]
       : ["-c", text];
 
     this.pruneCommands();
@@ -745,6 +838,13 @@ export class RootedExecutor {
       command_id: `cmd_${randomUUID()}`,
       pid: null,
       child: null,
+      pty_process: null,
+      pty_cleanup_requested: false,
+      pty: usePty,
+      cols: terminalCols,
+      rows: terminalRows,
+      terminal_type: usePty ? terminalType : "dumb",
+      terminal: null,
       status: "starting",
       requested_terminal_status: null,
       command: text,
@@ -765,52 +865,104 @@ export class RootedExecutor {
       resolveDone = resolveCommand;
     });
 
-    const child = spawn(shell, shellArgs, {
-      cwd,
-      windowsHide: true,
-      detached: !isWindows,
-      stdio: ["pipe", "pipe", "pipe"],
-      env: {
-        ...process.env,
-        TERM: "dumb"
+    if (usePty) {
+      record.terminal = new Terminal({
+        cols: terminalCols,
+        rows: terminalRows,
+        scrollback: 1000,
+        allowProposedApi: true
+      });
+
+      let ptyProcess;
+      try {
+        ptyProcess = nodePty.spawn(shell, shellArgs, {
+          name: terminalType,
+          cols: terminalCols,
+          rows: terminalRows,
+          cwd,
+          env: {
+            ...process.env,
+            TERM: terminalType
+          },
+          ...(isWindows ? {
+            useConptyDll: true
+          } : {})
+        });
+      } catch (error) {
+        record.terminal.dispose();
+        record.terminal = null;
+        throw new Error(`Could not start PTY command: ${error.message}`);
       }
-    });
 
-    record.child = child;
-    record.pid = child.pid || null;
-    record.status = "running";
-    this.commands.set(record.command_id, record);
+      record.pty_process = ptyProcess;
+      record.pid = ptyProcess.pid || null;
+      record.status = "running";
+      this.commands.set(record.command_id, record);
 
-    child.stdout.on("data", (chunk) => {
-      const textChunk = chunk.toString();
-      this.appendCommandOutput(record, "stdout", textChunk);
-      onChunk?.(textChunk, "stdout");
-    });
+      ptyProcess.onData((chunk) => {
+        this.appendCommandOutput(record, "stdout", chunk);
+        record.terminal?.write(chunk);
+        onChunk?.(chunk, "stdout");
+      });
 
-    child.stderr.on("data", (chunk) => {
-      const textChunk = chunk.toString();
-      this.appendCommandOutput(record, "stderr", textChunk);
-      onChunk?.(textChunk, "stderr");
-    });
+      ptyProcess.onExit(({ exitCode, signal }) => {
+        if (record.completed_at) return;
+        if (record.runtime_timer) clearTimeout(record.runtime_timer);
+        record.status = record.requested_terminal_status || "exited";
+        record.completed_at = Date.now();
+        record.exit_code = exitCode ?? (record.status === "exited" ? 0 : null);
+        record.signal = signal || null;
+        this.cleanupPtyResources(record);
+        resolveDone(this.commandSnapshot(record));
+      });
+    } else {
+      const child = spawn(shell, shellArgs, {
+        cwd,
+        windowsHide: true,
+        detached: !isWindows,
+        stdio: ["pipe", "pipe", "pipe"],
+        env: {
+          ...process.env,
+          TERM: "dumb"
+        }
+      });
 
-    child.on("error", (error) => {
-      this.appendCommandOutput(record, "stderr", `\nFailed to start shell: ${error.message}`);
-      record.status = "failed";
-      record.completed_at = Date.now();
-      record.exit_code = 1;
-      if (record.runtime_timer) clearTimeout(record.runtime_timer);
-      resolveDone(this.commandSnapshot(record));
-    });
+      record.child = child;
+      record.pid = child.pid || null;
+      record.status = "running";
+      this.commands.set(record.command_id, record);
 
-    child.on("close", (code, signal) => {
-      if (record.completed_at) return;
-      if (record.runtime_timer) clearTimeout(record.runtime_timer);
-      record.status = record.requested_terminal_status || "exited";
-      record.completed_at = Date.now();
-      record.exit_code = code ?? (record.status === "exited" ? 0 : null);
-      record.signal = signal || null;
-      resolveDone(this.commandSnapshot(record));
-    });
+      child.stdout.on("data", (chunk) => {
+        const textChunk = chunk.toString();
+        this.appendCommandOutput(record, "stdout", textChunk);
+        onChunk?.(textChunk, "stdout");
+      });
+
+      child.stderr.on("data", (chunk) => {
+        const textChunk = chunk.toString();
+        this.appendCommandOutput(record, "stderr", textChunk);
+        onChunk?.(textChunk, "stderr");
+      });
+
+      child.on("error", (error) => {
+        this.appendCommandOutput(record, "stderr", `\nFailed to start shell: ${error.message}`);
+        record.status = "failed";
+        record.completed_at = Date.now();
+        record.exit_code = 1;
+        if (record.runtime_timer) clearTimeout(record.runtime_timer);
+        resolveDone(this.commandSnapshot(record));
+      });
+
+      child.on("close", (code, signal) => {
+        if (record.completed_at) return;
+        if (record.runtime_timer) clearTimeout(record.runtime_timer);
+        record.status = record.requested_terminal_status || "exited";
+        record.completed_at = Date.now();
+        record.exit_code = code ?? (record.status === "exited" ? 0 : null);
+        record.signal = signal || null;
+        resolveDone(this.commandSnapshot(record));
+      });
+    }
 
     const maxRuntime = Math.min(
       Math.max(Number(max_runtime_ms || 0), 0),
@@ -836,7 +988,11 @@ export class RootedExecutor {
     const record = this.startCommand({
       command: args.command,
       workdir: args.workdir,
-      max_runtime_ms: args.max_runtime_ms || 0
+      max_runtime_ms: args.max_runtime_ms || 0,
+      pty: Boolean(args.pty),
+      cols: args.cols,
+      rows: args.rows,
+      terminal_type: args.terminal_type
     }, onChunk);
 
     const completed = await Promise.race([
@@ -890,18 +1046,65 @@ export class RootedExecutor {
     };
   }
 
-  writeBackgroundInput({ command_id, input, append_newline = true }) {
+  writeBackgroundInput({ command_id, input = "", append_newline = true, keys = [] }) {
     const record = this.requireCommand(command_id);
-    if (record.status !== "running" || !record.child?.stdin?.writable) {
+    if (record.status !== "running") {
       throw new Error("Background command is not accepting input.");
     }
 
-    const payload = String(input ?? "") + (append_newline ? "\n" : "");
-    record.child.stdin.write(payload);
+    let payload = String(input ?? "");
+    if (append_newline) payload += record.pty ? "\r" : "\n";
+
+    for (const key of Array.isArray(keys) ? keys : []) {
+      const sequence = TERMINAL_KEY_SEQUENCES[String(key || "").toUpperCase()];
+      if (!sequence) throw new Error(`Unsupported terminal key: ${key}`);
+      payload += sequence;
+    }
+
+    if (record.pty) {
+      if (!record.pty_process) throw new Error("PTY process is unavailable.");
+      record.pty_process.write(payload);
+    } else {
+      if (!record.child?.stdin?.writable) throw new Error("Background command is not accepting input.");
+      record.child.stdin.write(payload);
+    }
+
     return {
       success: true,
       command_id: record.command_id,
-      bytes_written: countBytes(payload)
+      pty: Boolean(record.pty),
+      bytes_written: countBytes(payload),
+      terminal: record.pty ? {
+        cols: record.cols,
+        rows: record.rows,
+        type: record.terminal_type,
+        screen: this.terminalScreenSnapshot(record)
+      } : null
+    };
+  }
+
+  resizeTerminal({ command_id, cols, rows }) {
+    const record = this.requireCommand(command_id);
+    if (!record.pty || !record.pty_process) {
+      throw new Error("That command is not running in PTY mode.");
+    }
+    if (record.status !== "running") {
+      throw new Error("Only a running PTY command can be resized.");
+    }
+
+    const nextCols = Math.min(Math.max(Number(cols || record.cols), 20), 500);
+    const nextRows = Math.min(Math.max(Number(rows || record.rows), 5), 200);
+    record.pty_process.resize(nextCols, nextRows);
+    record.terminal?.resize(nextCols, nextRows);
+    record.cols = nextCols;
+    record.rows = nextRows;
+
+    return {
+      success: true,
+      command_id: record.command_id,
+      cols: record.cols,
+      rows: record.rows,
+      screen: this.terminalScreenSnapshot(record)
     };
   }
 
@@ -915,6 +1118,24 @@ export class RootedExecutor {
     if (record.runtime_timer) {
       clearTimeout(record.runtime_timer);
       record.runtime_timer = null;
+    }
+
+    if (record.pty) {
+      try {
+        record.pty_process?.kill();
+      } catch {}
+      this.cleanupPtyResources(record);
+
+      await Promise.race([
+        record.done,
+        delay(3000)
+      ]);
+
+      if (record.status === "killing") {
+        record.status = terminalStatus;
+        record.completed_at ||= Date.now();
+      }
+      return this.commandSnapshot(record);
     }
 
     const child = record.child;
@@ -1120,13 +1341,20 @@ export class RootedExecutor {
     this.browserSessions.clear();
     await Promise.allSettled(browsers.map((record) => record.browser.close()));
 
-    if (!killRunning) return;
-    const running = [...this.commands.values()]
-      .filter((record) => record.status === "running" || record.status === "killing");
+    if (killRunning) {
+      const running = [...this.commands.values()]
+        .filter((record) => record.status === "running" || record.status === "killing");
 
-    await Promise.allSettled(
-      running.map((record) => this.terminateCommand(record, "killed"))
-    );
+      await Promise.allSettled(
+        running.map((record) => this.terminateCommand(record, "killed"))
+      );
+    }
+
+    for (const record of this.commands.values()) {
+      this.cleanupPtyResources(record);
+      record.terminal?.dispose();
+      record.terminal = null;
+    }
   }
 }
 
