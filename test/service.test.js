@@ -16,7 +16,7 @@ test("Windows service task is unattended, persistent, and rooted", () => {
   assert.match(xml, /C:\\Projects/);
   assert.match(xml, /D:\\Scratch/);
   assert.match(xml, /RestartOnFailure/);
-  assert.match(xml, /PT15S/);
+  assert.match(xml, /PT1M/);
   assert.match(xml, /MultipleInstancesPolicy>IgnoreNew/);
   assert.match(xml, /service\.log/);
 });

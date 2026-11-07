@@ -146,7 +146,7 @@ export function buildWindowsTaskXml(options, nodePath = process.execPath) {
     <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
     <Priority>7</Priority>
     <RestartOnFailure>
-      <Interval>PT15S</Interval>
+      <Interval>PT1M</Interval>
       <Count>999</Count>
     </RestartOnFailure>
   </Settings>
