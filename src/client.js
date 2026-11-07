@@ -31,6 +31,7 @@ export class Chat2rClient {
     this.ws = null;
     this.stopped = false;
     this.reconnectAttempt = 0;
+    this.reconnectTimer = null;
     this.heartbeatTimer = null;
     this.ready = false;
   }
@@ -71,6 +72,8 @@ export class Chat2rClient {
 
     ws.on("open", () => {
       this.reconnectAttempt = 0;
+      if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
       this.ready = false;
       this.ui.log("Connected to relay.", "success");
       this.sendHello();
@@ -134,11 +137,14 @@ export class Chat2rClient {
   }
 
   scheduleReconnect() {
+    if (this.reconnectTimer || this.stopped) return;
     const attempt = Math.min(this.reconnectAttempt++, 6);
     const delay = Math.min(30000, 1000 * (2 ** attempt));
     this.ui.log(`Reconnecting in ${Math.round(delay / 1000)}s…`);
-    const timer = setTimeout(() => void this.connect(), delay);
-    timer.unref?.();
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      void this.connect();
+    }, delay);
   }
 
   send(type, payload = {}, id) {
@@ -404,6 +410,8 @@ export class Chat2rClient {
 
   stop() {
     this.stopped = true;
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
     this.stopHeartbeat();
     void this.executor.shutdown({ killRunning: true });
     if (this.ws?.readyState === WebSocket.OPEN) {
