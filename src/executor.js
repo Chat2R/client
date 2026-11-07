@@ -1053,9 +1053,12 @@ export class RootedExecutor {
     }
 
     let payload = String(input ?? "");
-    if (append_newline) payload += record.pty ? "\r" : "\n";
+    const keyList = Array.isArray(keys) ? keys : [];
+    if (append_newline && (payload.length > 0 || keyList.length === 0)) {
+      payload += record.pty ? "\r" : "\n";
+    }
 
-    for (const key of Array.isArray(keys) ? keys : []) {
+    for (const key of keyList) {
       const sequence = TERMINAL_KEY_SEQUENCES[String(key || "").toUpperCase()];
       if (!sequence) throw new Error(`Unsupported terminal key: ${key}`);
       payload += sequence;
