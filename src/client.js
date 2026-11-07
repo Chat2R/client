@@ -111,7 +111,8 @@ export class Chat2rClient {
       },
       capabilities: {
         shell: this.allowShell,
-        pty: this.allowShell
+        pty: this.allowShell,
+        git: this.allowShell
       }
     });
   }
@@ -207,6 +208,17 @@ export class Chat2rClient {
     if (tool === "exec_command") {
       return `Command: ${args.command}\nWorkdir: ${args.workdir || this.executor.roots[0]}`;
     }
+    if (tool === "git_commit") {
+      const staged = args.stage_all
+        ? "all changes"
+        : Array.isArray(args.paths) && args.paths.length
+          ? args.paths.join(", ")
+          : "currently staged changes";
+      return `Repository: ${args.workdir || this.executor.roots[0]}\nCommit: ${args.message}\nStage: ${staged}`;
+    }
+    if (tool === "git_push") {
+      return `Repository: ${args.workdir || this.executor.roots[0]}\nRemote: ${args.remote || "origin"}\nBranch: ${args.branch || "current"}`;
+    }
     if (tool === "delete_file") {
       return `Path: ${args.file_path}\nRecursive: ${Boolean(args.recursive)}`;
     }
@@ -285,6 +297,21 @@ export class Chat2rClient {
           break;
         case "get_system_info":
           result = this.executor.getSystemInfo(args);
+          break;
+        case "git_status":
+          result = this.executor.gitStatus(args);
+          break;
+        case "git_diff":
+          result = this.executor.gitDiff(args);
+          break;
+        case "git_log":
+          result = this.executor.gitLog(args);
+          break;
+        case "git_commit":
+          result = this.executor.gitCommit(args);
+          break;
+        case "git_push":
+          result = this.executor.gitPush(args);
           break;
         case "list_processes":
           result = this.executor.listProcesses(args);

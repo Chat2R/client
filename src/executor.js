@@ -727,6 +727,190 @@ export class RootedExecutor {
     return cwd;
   }
 
+  gitRepository(workdir) {
+    if (!this.allowShell) {
+      throw new Error("Git tools are disabled because shell execution is disabled.");
+    }
+    const cwd = this.commandWorkdir(workdir);
+    const result = spawnSync("git", ["-C", cwd, "rev-parse", "--show-toplevel"], {
+      windowsHide: true,
+      encoding: "utf8",
+      timeout: 10000,
+      maxBuffer: 1024 * 1024
+    });
+    if (result.error) throw new Error(`Could not run Git: ${result.error.message}`);
+    if (result.status !== 0) throw new Error(String(result.stderr || "Working directory is not inside a Git repository.").trim());
+
+    const repoRoot = realpathSync.native(String(result.stdout || "").trim());
+    if (!this.roots.some((root) => containment(root, repoRoot))) {
+      throw new Error("Git repository root is outside the shared roots.");
+    }
+
+    return { cwd, repoRoot };
+  }
+
+  runGit(workdir, args, { env = null, maxBuffer = 4 * 1024 * 1024, timeout = 30000 } = {}) {
+    const { cwd, repoRoot } = this.gitRepository(workdir);
+    const result = spawnSync("git", ["-C", cwd, ...args], {
+      windowsHide: true,
+      encoding: "utf8",
+      timeout,
+      maxBuffer,
+      env: env ? { ...process.env, ...env } : process.env
+    });
+    if (result.error) throw new Error(`Git failed: ${result.error.message}`);
+    if (result.status !== 0) {
+      const message = String(result.stderr || result.stdout || `Git exited with code ${result.status}`).trim();
+      throw new Error(message);
+    }
+    return {
+      repo_root: this.relativeDisplay(repoRoot),
+      stdout: String(result.stdout || "").trimEnd(),
+      stderr: String(result.stderr || "").trimEnd()
+    };
+  }
+
+  gitStatus({ workdir } = {}) {
+    const result = this.runGit(workdir, ["status", "--short", "--branch", "--untracked-files=all"]);
+    const lines = result.stdout ? result.stdout.split(/\r?\n/) : [];
+    const branch_line = lines[0]?.startsWith("## ") ? lines.shift().slice(3) : null;
+    return {
+      repo_root: result.repo_root,
+      branch_line,
+      clean: lines.length === 0,
+      files: lines.map((line) => ({
+        status: line.slice(0, 2),
+        path: line.slice(3)
+      }))
+    };
+  }
+
+  gitDiff({ workdir, staged = false, paths = [], context = 3 } = {}) {
+    const safeContext = Math.min(Math.max(Number(context || 3), 0), 20);
+    const safePaths = Array.isArray(paths) ? paths.map((item) => String(item)).slice(0, 200) : [];
+    const args = ["diff", "--no-ext-diff", `--unified=${safeContext}`];
+    if (staged) args.push("--cached");
+    if (safePaths.length) args.push("--", ...safePaths);
+    const result = this.runGit(workdir, args, { maxBuffer: 8 * 1024 * 1024 });
+    return {
+      repo_root: result.repo_root,
+      staged: Boolean(staged),
+      diff: truncateOutput(result.stdout, this.maxOutputBytes)
+    };
+  }
+
+  gitLog({ workdir, limit = 20 } = {}) {
+    const max = Math.min(Math.max(Number(limit || 20), 1), 100);
+    const format = "%H%x00%h%x00%an%x00%ae%x00%cn%x00%ce%x00%aI%x00%cI%x00%s%x1e";
+    const result = this.runGit(workdir, ["log", `-${max}`, `--pretty=format:${format}`]);
+    const commits = result.stdout
+      .split("\x1e")
+      .map((record) => record.trim())
+      .filter(Boolean)
+      .map((record) => {
+        const [sha, short_sha, author_name, author_email, committer_name, committer_email, authored_at, committed_at, subject] = record.split("\x00");
+        return {
+          sha,
+          short_sha,
+          subject,
+          author: { name: author_name, email: author_email },
+          committer: { name: committer_name, email: committer_email },
+          authored_at,
+          committed_at
+        };
+      });
+    return { repo_root: result.repo_root, commits };
+  }
+
+  gitCommit({
+    workdir,
+    message,
+    stage_all = false,
+    paths = [],
+    allow_empty = false,
+    author_name,
+    author_email,
+    committer_name,
+    committer_email
+  }) {
+    const text = String(message || "").trim();
+    if (!text) throw new Error("Commit message is required.");
+
+    const safePaths = Array.isArray(paths) ? paths.map((item) => String(item)).slice(0, 200) : [];
+    if (stage_all && safePaths.length) throw new Error("Use either stage_all=true or paths, not both.");
+
+    const identity = {
+      author_name: String(author_name || ""),
+      author_email: String(author_email || ""),
+      committer_name: String(committer_name || ""),
+      committer_email: String(committer_email || "")
+    };
+    for (const [key, value] of Object.entries(identity)) {
+      if (!value || value.length > 320 || /[\r\n\0]/.test(value)) {
+        throw new Error(`Invalid Git identity field: ${key}`);
+      }
+    }
+
+    if (stage_all) {
+      this.runGit(workdir, ["add", "-A"]);
+    } else if (safePaths.length) {
+      this.runGit(workdir, ["add", "--", ...safePaths]);
+    }
+
+    const args = ["-c", "commit.gpgsign=false", "commit", "-m", text];
+    if (allow_empty) args.push("--allow-empty");
+    const committed = this.runGit(workdir, args, {
+      env: {
+        GIT_AUTHOR_NAME: identity.author_name,
+        GIT_AUTHOR_EMAIL: identity.author_email,
+        GIT_COMMITTER_NAME: identity.committer_name,
+        GIT_COMMITTER_EMAIL: identity.committer_email
+      },
+      timeout: 60000
+    });
+    const metadata = this.runGit(workdir, [
+      "show",
+      "-s",
+      "--format=%H%x00%h%x00%an%x00%ae%x00%cn%x00%ce%x00%s",
+      "HEAD"
+    ]);
+    const [sha, short_sha, actual_author_name, actual_author_email, actual_committer_name, actual_committer_email, subject] = metadata.stdout.split("\x00");
+
+    return {
+      success: true,
+      repo_root: committed.repo_root,
+      sha,
+      short_sha,
+      subject,
+      author: { name: actual_author_name, email: actual_author_email },
+      committer: { name: actual_committer_name, email: actual_committer_email }
+    };
+  }
+
+  gitPush({ workdir, remote = "origin", branch = null, set_upstream = false } = {}) {
+    const safeRemote = String(remote || "origin");
+    const safeBranch = branch == null ? null : String(branch);
+    if (safeRemote.startsWith("-") || !/^[A-Za-z0-9._/-]{1,200}$/.test(safeRemote)) {
+      throw new Error("Invalid Git remote name.");
+    }
+    if (safeBranch && (safeBranch.startsWith("-") || !/^[A-Za-z0-9._/-]{1,300}$/.test(safeBranch))) {
+      throw new Error("Invalid Git branch name.");
+    }
+
+    const args = ["push"];
+    if (set_upstream) args.push("--set-upstream");
+    args.push(safeRemote);
+    if (safeBranch) args.push(safeBranch);
+    const result = this.runGit(workdir, args, { timeout: 5 * 60 * 1000, maxBuffer: 4 * 1024 * 1024 });
+    return {
+      success: true,
+      repo_root: result.repo_root,
+      remote: safeRemote,
+      branch: safeBranch,
+      output: [result.stdout, result.stderr].filter(Boolean).join("\n")
+    };
+  }
+
   appendCommandOutput(record, stream, chunk) {
     const key = stream === "stderr" ? "stderr" : "stdout";
     const current = record[key];
