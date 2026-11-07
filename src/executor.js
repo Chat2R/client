@@ -168,6 +168,8 @@ export class RootedExecutor {
     return {
       content,
       lines_count: lines.length,
+      start_line: start + 1,
+      end_line: end,
       has_more: end < lines.length || content !== selected,
       file_path: this.relativeDisplay(path)
     };
