@@ -45,13 +45,20 @@ function vbString(value) {
 }
 
 function run(command, args, options = {}) {
-  const result = spawnSync(command, args, {
+  const { allowFailure = false, ...spawnOptions } = options;
+  const isWindowsScript = platform() === "win32" && /\.(?:cmd|bat)$/iu.test(command);
+  const executable = isWindowsScript ? (process.env.ComSpec || "cmd.exe") : command;
+  const executableArgs = isWindowsScript
+    ? ["/d", "/s", "/c", command, ...args]
+    : args;
+
+  const result = spawnSync(executable, executableArgs, {
     encoding: "utf8",
     windowsHide: true,
-    ...options
+    ...spawnOptions
   });
   if (result.error) throw result.error;
-  if (result.status !== 0 && !options.allowFailure) {
+  if (result.status !== 0 && !allowFailure) {
     const detail = String(result.stderr || result.stdout || "").trim();
     throw new Error(detail || `${command} exited with code ${result.status}.`);
   }
