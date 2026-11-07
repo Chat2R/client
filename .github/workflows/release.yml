@@ -1,4 +1,4 @@
-﻿name: Release client
+name: Release client
 
 on:
   push:
@@ -9,14 +9,20 @@ permissions:
   contents: read
 
 jobs:
-  verify:
+  publish:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: "24"
-          cache: npm
+          registry-url: "https://npm.pkg.github.com"
+          scope: "@chat2r"
+
       - name: Verify tag matches package version
         shell: bash
         run: |
@@ -25,25 +31,12 @@ jobs:
             echo "Tag $GITHUB_REF_NAME does not match package version $EXPECTED"
             exit 1
           }
+
       - run: npm ci
       - run: npm run verify
       - run: npm pack --dry-run
 
-  github-packages:
-    needs: verify
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "24"
-          registry-url: "https://npm.pkg.github.com"
-          scope: "@chat2r"
-      - run: npm ci
-      - name: Build GitHub Packages mirror
+      - name: Build scoped GitHub Packages package
         id: package
         shell: bash
         run: |
@@ -58,34 +51,15 @@ jobs:
           const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
           pkg.name = "@chat2r/client";
           pkg.publishConfig = {
-            ...(pkg.publishConfig || {}),
             registry: "https://npm.pkg.github.com"
           };
-          fs.writeFileSync("package.json", JSON.stringify(pkg, null, 2) + "\n");
+          fs.writeFileSync("package.json", JSON.stringify(pkg, null, 2) + "
+");
           NODE
           echo "dir=$RUNNER_TEMP/chat2r-github/package" >> "$GITHUB_OUTPUT"
-      - name: Publish @chat2r/client to GitHub Packages
+
+      - name: Publish @chat2r/client
         working-directory: ${{ steps.package.outputs.dir }}
-        run: npm publish --registry=https://npm.pkg.github.com
+        run: npm publish
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  npmjs:
-    if: vars.NPMJS_TRUSTED_PUBLISHING == 'true'
-    needs: verify
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      id-token: write
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "24"
-          registry-url: "https://registry.npmjs.org"
-          package-manager-cache: false
-      - run: npm ci
-      - name: Publish chat2r to npmjs
-        run: npm publish --access public
-
-

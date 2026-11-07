@@ -19,6 +19,7 @@ const SERVICE_LOG = join(CONFIG_DIR, "service.log");
 const SERVICE_LAUNCHER = join(CONFIG_DIR, "service-launcher.vbs");
 const RUNTIME_DIR = join(CONFIG_DIR, "service-runtime");
 const PACKAGE_JSON = fileURLToPath(new URL("../package.json", import.meta.url));
+const PACKAGE_ROOT = dirname(PACKAGE_JSON);
 
 function xml(value) {
   return String(value)
@@ -57,12 +58,25 @@ function run(command, args, options = {}) {
   return result;
 }
 
+function packageMetadata() {
+  return JSON.parse(readFileSync(PACKAGE_JSON, "utf8"));
+}
+
 function packageVersion() {
-  return JSON.parse(readFileSync(PACKAGE_JSON, "utf8")).version;
+  return packageMetadata().version;
+}
+
+function packageName() {
+  return packageMetadata().name;
+}
+
+function runtimePackageDir() {
+  const parts = packageName().split("/");
+  return join(RUNTIME_DIR, "node_modules", ...parts);
 }
 
 function runtimeBin() {
-  return join(RUNTIME_DIR, "node_modules", "chat2r", "bin", "chat2r.js");
+  return join(runtimePackageDir(), "bin", "chat2r.js");
 }
 
 function normalizedServiceOptions(options = {}) {
@@ -96,15 +110,25 @@ function serviceArgs(options) {
 function installRuntime() {
   mkdirSync(RUNTIME_DIR, { recursive: true });
   const npm = platform() === "win32" ? "npm.cmd" : "npm";
-  run(npm, [
-    "install",
-    "--prefix",
-    RUNTIME_DIR,
-    `chat2r@${packageVersion()}`,
-    "--omit=dev",
-    "--no-audit",
-    "--no-fund"
-  ]);
+  const packed = run(npm, ["pack", PACKAGE_ROOT, "--pack-destination", CONFIG_DIR]);
+  const filename = String(packed.stdout || "").trim().split(/\r?\n/u).filter(Boolean).at(-1);
+  if (!filename) throw new Error("Could not create the pinned Chat2R service package.");
+  const tarball = join(CONFIG_DIR, filename);
+
+  try {
+    run(npm, [
+      "install",
+      "--prefix",
+      RUNTIME_DIR,
+      tarball,
+      "--omit=dev",
+      "--no-audit",
+      "--no-fund"
+    ]);
+  } finally {
+    rmSync(tarball, { force: true });
+  }
+
   if (!existsSync(runtimeBin())) {
     throw new Error("The Chat2R service runtime was installed, but its CLI entrypoint is missing.");
   }
