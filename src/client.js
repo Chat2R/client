@@ -23,7 +23,7 @@ export class Chat2rClient {
     this.noOpen = Boolean(options.noOpen || this.unattended);
     this.roots = options.roots?.length ? options.roots : [process.cwd()];
     this.allowShell = options.allowShell !== false;
-    this.ui = options.ui || new TerminalUI({ interactive: !this.unattended });
+    this.ui = options.ui || new TerminalUI({ interactive: !this.unattended, logFile: options.logFile || null });
     this.executor = options.executor || createExecutor({
       roots: this.roots,
       allowShell: this.allowShell

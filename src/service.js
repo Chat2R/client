@@ -79,7 +79,9 @@ function serviceArgs(options) {
     "--unattended",
     "--no-open",
     "--server",
-    options.server
+    options.server,
+    "--log-file",
+    SERVICE_LOG
   ];
   for (const root of options.roots) args.push("--root", root);
   if (!options.allowShell) args.push("--no-shell");
@@ -107,10 +109,7 @@ export function buildWindowsTaskXml(options, nodePath = process.execPath) {
   const username = process.env.USERDOMAIN && process.env.USERNAME
     ? `${process.env.USERDOMAIN}\\${process.env.USERNAME}`
     : userInfo().username;
-  const commandArgs = serviceArgs(options).map(windowsQuote).join(" ");
-  const commandLine = `${windowsQuote(nodePath)} ${commandArgs} >> ${windowsQuote(SERVICE_LOG)} 2>&1`;
-  const cmd = process.env.ComSpec || "C:\\Windows\\System32\\cmd.exe";
-  const argumentsText = `/d /s /c "${commandLine.replaceAll('"', '""')}"`;
+  const argumentsText = serviceArgs(options).map(windowsQuote).join(" ");
 
   return `<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
@@ -152,7 +151,7 @@ export function buildWindowsTaskXml(options, nodePath = process.execPath) {
   </Settings>
   <Actions Context="Author">
     <Exec>
-      <Command>${xml(cmd)}</Command>
+      <Command>${xml(nodePath)}</Command>
       <Arguments>${xml(argumentsText)}</Arguments>
       <WorkingDirectory>${xml(options.roots[0])}</WorkingDirectory>
     </Exec>

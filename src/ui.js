@@ -1,3 +1,4 @@
+import { appendFileSync } from "node:fs";
 import readline from "node:readline";
 
 const ANSI = {
@@ -12,8 +13,9 @@ const ANSI = {
 };
 
 export class TerminalUI {
-  constructor({ interactive = true } = {}) {
+  constructor({ interactive = true, logFile = null } = {}) {
     this.interactive = Boolean(interactive);
+    this.logFile = logFile ? String(logFile) : null;
     this.rl = this.interactive
       ? readline.createInterface({
           input: process.stdin,
@@ -39,6 +41,11 @@ export class TerminalUI {
     };
     const style = styles[type] || styles.info;
     console.log(`${ANSI.gray}${time}${ANSI.reset}  ${style.color}${style.icon}${ANSI.reset} ${message}`);
+    if (this.logFile) {
+      try {
+        appendFileSync(this.logFile, `${new Date().toISOString()}  ${style.icon} ${String(message)}\n`, "utf8");
+      } catch {}
+    }
   }
 
   section(title) {

@@ -13,7 +13,8 @@ const options = {
   roots: [],
   unattended: false,
   allowShell: true,
-  noOpen: false
+  noOpen: false,
+  logFile: null
 };
 
 function valueAfter(index, flag) {
@@ -70,6 +71,17 @@ for (let index = 0; index < args.length; index++) {
     continue;
   }
 
+  if (arg === "--log-file") {
+    options.logFile = resolve(valueAfter(index, arg));
+    index++;
+    continue;
+  }
+
+  if (arg.startsWith("--log-file=")) {
+    options.logFile = resolve(arg.slice("--log-file=".length));
+    continue;
+  }
+
   if (arg === "--help" || arg === "-h") {
     console.log(`
 Chat2R 2.0
@@ -86,6 +98,7 @@ Options:
       --no-shell           Disable shell command execution entirely.
   -u, --unattended         Daemon-friendly mode: no stdin/browser prompts, reconnects indefinitely.
       --no-open            Do not automatically open the pairing page.
+      --log-file <path>    Append plain-text client logs to a file.
   -h, --help               Show this help.
 
 Examples:
