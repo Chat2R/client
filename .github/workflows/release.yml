@@ -53,8 +53,7 @@ jobs:
           pkg.publishConfig = {
             registry: "https://npm.pkg.github.com"
           };
-          fs.writeFileSync("package.json", JSON.stringify(pkg, null, 2) + "
-");
+          fs.writeFileSync("package.json", JSON.stringify(pkg, null, 2) + String.fromCharCode(10));
           NODE
           echo "dir=$RUNNER_TEMP/chat2r-github/package" >> "$GITHUB_OUTPUT"
 
