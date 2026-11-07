@@ -13,15 +13,18 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: write
+      id-token: write
 
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: "24"
-          registry-url: "https://npm.pkg.github.com"
-          scope: "@chat2r"
+          registry-url: "https://registry.npmjs.org"
+          package-manager-cache: false
+
+      - name: Ensure OIDC-capable npm
+        run: npm install -g npm@^11.15.0
 
       - name: Verify tag matches package version
         shell: bash
@@ -36,29 +39,5 @@ jobs:
       - run: npm run verify
       - run: npm pack --dry-run
 
-      - name: Build scoped GitHub Packages package
-        id: package
-        shell: bash
-        run: |
-          mkdir -p "$RUNNER_TEMP/chat2r-pack"
-          npm pack --pack-destination "$RUNNER_TEMP/chat2r-pack" >/dev/null
-          TARBALL="$(find "$RUNNER_TEMP/chat2r-pack" -maxdepth 1 -name 'chat2r-*.tgz' -print -quit)"
-          mkdir -p "$RUNNER_TEMP/chat2r-github"
-          tar -xzf "$TARBALL" -C "$RUNNER_TEMP/chat2r-github"
-          cd "$RUNNER_TEMP/chat2r-github/package"
-          node - <<'NODE'
-          const fs = require("node:fs");
-          const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
-          pkg.name = "@chat2r/client";
-          pkg.publishConfig = {
-            registry: "https://npm.pkg.github.com"
-          };
-          fs.writeFileSync("package.json", JSON.stringify(pkg, null, 2) + String.fromCharCode(10));
-          NODE
-          echo "dir=$RUNNER_TEMP/chat2r-github/package" >> "$GITHUB_OUTPUT"
-
-      - name: Publish @chat2r/client
-        working-directory: ${{ steps.package.outputs.dir }}
-        run: npm publish
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish chat2r to npmjs
+        run: npm publish --access public
