@@ -57,7 +57,7 @@ export class Chat2rClient {
     }
 
     if (this.unattended) {
-      this.ui.log("Unattended mode is enabled: local approval prompts will be skipped.", "warning");
+      this.ui.log("Unattended mode: no local approval prompts, browser launch, or stdin interaction; reconnect stays active through relay/network outages.", "warning");
     }
 
     await this.connect();
@@ -114,7 +114,6 @@ export class Chat2rClient {
         this.ui.log("Ignored malformed relay message.", "warning");
         return;
       }
-      this.reconnectAttempt = 0;
       void this.handleServerMessage(message).catch((error) => {
         this.ui.log(`Relay message handling failed: ${error.message}`, "error");
       });
@@ -130,6 +129,12 @@ export class Chat2rClient {
 
       const reasonText = reason?.toString() || "connection closed";
       this.ui.log(`Disconnected (${code}: ${reasonText}).`, "warning");
+      if (code === 4000 && /replaced/i.test(reasonText)) {
+        this.stopped = true;
+        this.ui.log("Another Chat2R client took over this machine. This instance will stop instead of reconnecting.", "warning");
+        this.ui.close();
+        return;
+      }
       this.scheduleReconnect();
     });
 
@@ -241,6 +246,7 @@ export class Chat2rClient {
       }
 
       case MSG_TYPES.PAIRED: {
+        this.reconnectAttempt = 0;
         const { machineId, name, credential } = message.payload;
         this.config = saveConfig({
           serverUrl: this.serverUrl,
@@ -255,6 +261,7 @@ export class Chat2rClient {
       }
 
       case MSG_TYPES.DEVICE_READY: {
+        this.reconnectAttempt = 0;
         this.ready = true;
         this.ui.log(`Authenticated as "${message.payload.name || this.config.machineName || "Machine"}".`, "success");
         this.ui.log("Ready for ChatGPT.", "success");

@@ -130,6 +130,42 @@ test("unattended client reconnects after a relay reboot", async () => {
   }
 });
 
+test("a client replaced by another instance stops instead of reconnecting", async () => {
+  const port = await reservePort();
+  const server = createServer();
+  const wss = new WebSocketServer({ server });
+  let connections = 0;
+
+  wss.on("connection", (socket) => {
+    connections += 1;
+    socket.on("message", (raw) => {
+      const message = parseMessage(raw);
+      if (message?.type !== MSG_TYPES.HELLO) return;
+      socket.send(makeMessage(MSG_TYPES.DEVICE_READY, { name: "TestMachine" }));
+      setTimeout(() => socket.close(4000, "replaced"), 20);
+    });
+  });
+
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(port, "127.0.0.1", resolve);
+  });
+
+  const client = createClient(port);
+  try {
+    await client.start();
+    await waitFor(() => client.stopped === true);
+    await new Promise((resolve) => setTimeout(resolve, 350));
+    assert.equal(connections, 1);
+    assert.equal(client.ready, false);
+  } finally {
+    client.stop();
+    for (const socket of wss.clients) socket.terminate();
+    await new Promise((resolve) => wss.close(resolve));
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
 test("action completion during a relay outage does not crash the client", async () => {
   const client = createClient(await reservePort());
   client.executor.getSystemInfo = () => ({ ok: true });

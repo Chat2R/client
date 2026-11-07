@@ -2,8 +2,12 @@
 
 import { resolve } from "node:path";
 import { Chat2rClient } from "../src/client.js";
+import { manageService } from "../src/service.js";
 
-const args = process.argv.slice(2);
+const rawArgs = process.argv.slice(2);
+const serviceMode = rawArgs[0] === "service";
+const serviceAction = serviceMode ? (rawArgs[1] || "status") : null;
+const args = serviceMode ? rawArgs.slice(2) : rawArgs;
 const options = {
   server: process.env.CHAT2R_SERVER || process.env.CHAT2U_SERVER || undefined,
   roots: [],
@@ -72,6 +76,7 @@ Chat2R 2.0
 
 Usage:
   chat2r [options]
+  chat2r service <install|start|stop|restart|status|logs|uninstall> [options]
 
 Options:
   -s, --server <url>       Relay URL. Defaults to saved config or https://chat2r.ender.com.pl.
@@ -86,6 +91,8 @@ Options:
 Examples:
   chat2r --root .
   chat2r --root C:\\Projects --root D:\\Scratch
+  chat2r service install --root C:\\Projects
+  chat2r service status
 `);
     process.exit(0);
   }
@@ -95,6 +102,28 @@ Examples:
 }
 
 if (!options.roots.length) options.roots.push(process.cwd());
+
+if (serviceMode) {
+  const allowed = new Set(["install", "start", "stop", "restart", "status", "logs", "uninstall"]);
+  if (!allowed.has(serviceAction)) {
+    console.error(`Unknown service action: ${serviceAction}`);
+    process.exit(2);
+  }
+  try {
+    const result = manageService(serviceAction, options);
+    if (typeof result === "string") console.log(result);
+    else if (serviceAction === "logs") {
+      console.log(`Log: ${result.log_file}`);
+      process.stdout.write(result.content || "");
+    } else {
+      console.log(JSON.stringify(result, null, 2));
+    }
+    process.exit(0);
+  } catch (error) {
+    console.error(`Chat2R service error: ${error.message}`);
+    process.exit(1);
+  }
+}
 
 const client = new Chat2rClient(options);
 
