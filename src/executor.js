@@ -93,6 +93,16 @@ function truncateOutput(value, maxBytes) {
   return buffer.subarray(0, maxBytes).toString("utf8") + "\n[output truncated]";
 }
 
+function escapeRegex(value) {
+  const specials = new Set(["\\", "^", "$", ".", "*", "+", "?", "(", ")", "[", "]", "{", "}", "|"]);
+  return [...String(value)].map((char) => specials.has(char) ? "\\" + char : char).join("");
+}
+
+function flexiblePattern(search, matchMode, ignoreWhitespace) {
+  const source = matchMode === "regex" ? String(search) : escapeRegex(search);
+  return ignoreWhitespace ? source.replace(/\s+/g, "\\s+") : source;
+}
+
 function delay(ms) {
   return new Promise((resolveDelay) => {
     const timer = setTimeout(resolveDelay, ms);
@@ -235,22 +245,62 @@ export class RootedExecutor {
     };
   }
 
-  editFile({ file_path, old_string, new_string, replace_all = false }) {
+  editFile({
+    file_path,
+    old_string,
+    new_string,
+    replace_all = false,
+    match_mode = "exact",
+    ignore_whitespace = false
+  }) {
     const { path } = this.resolveExisting(file_path);
     const stat = statSync(path);
     if (!stat.isFile()) throw new Error(`Not a file: ${file_path}`);
     if (stat.size > this.maxTextBytes) throw new Error("File is too large for text editing.");
 
-    const content = readFileSync(path, "utf8");
-    const occurrences = content.split(old_string).length - 1;
-    if (occurrences === 0) throw new Error(`old_string not found in ${file_path}.`);
-    if (!replace_all && occurrences !== 1) {
-      throw new Error(`old_string occurs ${occurrences} times. Include more context or set replace_all=true.`);
-    }
+    const search = String(old_string ?? "");
+    const replacement = String(new_string ?? "");
+    if (!search) throw new Error("old_string cannot be empty.");
+    if (!["exact", "regex"].includes(match_mode)) throw new Error("match_mode must be exact or regex.");
 
-    const updated = replace_all
-      ? content.split(old_string).join(new_string)
-      : content.replace(old_string, new_string);
+    const content = readFileSync(path, "utf8");
+    let updated;
+    let occurrences;
+
+    if (match_mode === "exact" && !ignore_whitespace) {
+      occurrences = content.split(search).length - 1;
+      if (occurrences === 0) throw new Error(`old_string not found in ${file_path}.`);
+      if (!replace_all && occurrences !== 1) {
+        throw new Error(`old_string occurs ${occurrences} times. Include more context or set replace_all=true.`);
+      }
+      updated = replace_all
+        ? content.split(search).join(replacement)
+        : content.replace(search, () => replacement);
+    } else {
+      const pattern = flexiblePattern(search, match_mode, Boolean(ignore_whitespace));
+      let probe;
+      try {
+        probe = new RegExp(pattern, "m");
+      } catch (error) {
+        throw new Error(`Invalid replacement regular expression: ${error.message}`);
+      }
+      if (probe.test("")) throw new Error("Replacement pattern must not match an empty string.");
+
+      const counter = new RegExp(pattern, "gm");
+      occurrences = Array.from(content.matchAll(counter)).length;
+      if (occurrences === 0) {
+        const modeLabel = match_mode === "regex" ? "regex pattern" : "whitespace-tolerant old_string";
+        throw new Error(`${modeLabel} not found in ${file_path}.`);
+      }
+      if (!replace_all && occurrences !== 1) {
+        throw new Error(`replacement pattern occurs ${occurrences} times. Include more context or set replace_all=true.`);
+      }
+
+      const matcher = new RegExp(pattern, replace_all ? "gm" : "m");
+      updated = match_mode === "regex"
+        ? content.replace(matcher, replacement)
+        : content.replace(matcher, () => replacement);
+    }
 
     if (countBytes(updated) > this.maxTextBytes) throw new Error("Edited file would exceed the text size limit.");
 
@@ -261,6 +311,8 @@ export class RootedExecutor {
     return {
       success: true,
       replacements: replace_all ? occurrences : 1,
+      match_mode,
+      ignore_whitespace: Boolean(ignore_whitespace),
       file_path: displayPath,
       diff: {
         loc_added: diff.locAdded,
@@ -524,7 +576,9 @@ export class RootedExecutor {
             file_path: operation.file_path,
             old_string: String(operation.old_string ?? ""),
             new_string: String(operation.new_string ?? ""),
-            replace_all: Boolean(operation.replace_all)
+            replace_all: Boolean(operation.replace_all),
+            match_mode: operation.match_mode === "regex" ? "regex" : "exact",
+            ignore_whitespace: Boolean(operation.ignore_whitespace)
           })
         });
         continue;
